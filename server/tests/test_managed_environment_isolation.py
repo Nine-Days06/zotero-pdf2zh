@@ -1,4 +1,6 @@
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -7,7 +9,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from utils import execute
+from utils.environment_lifecycle import _MANAGED_RUNTIME_HEALTH_CODE
 from utils.environment_lifecycle import _build_install_command
+from utils.environment_lifecycle import load_requirements
 from utils.environment_lifecycle import managed_python_env
 from utils.environment_lifecycle import managed_runtime_health
 from utils.environment_lifecycle import runtime_supports_deepseek_thinking
@@ -219,6 +223,58 @@ class ManagedEnvironmentIsolationTest(unittest.TestCase):
         self.assertNotIn("PYTHONHOME", captured)
         self.assertEqual(captured["PYTHONNOUSERSITE"], "1")
         self.assertEqual(captured["PATH"], "managed-bin")
+
+    def test_managed_requirements_pin_bitstring_below_five(self):
+        server_root = Path(__file__).resolve().parents[1]
+        for env_tool in ("conda", "uv"):
+            _version, packages = load_requirements(
+                "pdf2zh_next",
+                env_tool,
+                server_root / "config" / "venv.json.example",
+            )
+            pins = [item for item in packages if item.startswith("bitstring")]
+            self.assertEqual(
+                len(pins),
+                1,
+                f"{env_tool} must pin bitstring exactly once, got {pins}",
+            )
+            self.assertIn(
+                "<5",
+                pins[0],
+                "babeldoc imports BitStream, which bitstring 5.x removed",
+            )
+
+    def test_health_probe_reports_bitstring_without_bitstream(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake = Path(temp_dir)
+            (fake / "bitstring.py").write_text(
+                "__all__ = ['Reader', 'BitArray', 'Array', 'Bits', 'pack', "
+                "'ReadError', 'Dtype']\nclass BitArray:\n    pass\n",
+                encoding="utf-8",
+            )
+
+            env = {**os.environ, "PYTHONPATH": str(fake)}
+            result = subprocess.run(
+                [sys.executable, "-c", _MANAGED_RUNTIME_HEALTH_CODE],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        payload = json.loads(result.stdout.strip() or "{}")
+        self.assertFalse(payload["ok"])
+        self.assertIn("BitStream", payload["reason"])
+
+    def test_health_probe_tolerates_a_runtime_without_bitstring(self):
+        result = subprocess.run(
+            [sys.executable, "-c", _MANAGED_RUNTIME_HEALTH_CODE],
+            capture_output=True,
+            text=True,
+            env=managed_python_env(),
+        )
+
+        payload = json.loads(result.stdout.strip() or "{}")
+        self.assertTrue(payload["ok"], payload.get("reason"))
 
 
 if __name__ == "__main__":

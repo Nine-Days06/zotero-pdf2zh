@@ -616,6 +616,33 @@ def _run_install(
     return False
 
 
+_MANAGED_RUNTIME_HEALTH_CODE = (
+    "import importlib, importlib.util, json, os, sys; "
+    "root=os.path.normcase(os.path.realpath(sys.prefix)); "
+    "names=('pydantic','pydantic_core','pydantic_core._pydantic_core'); "
+    "out={'ok': True, 'reason': 'ok', 'root': root}; "
+    "\ntry:\n"
+    "    for name in names:\n"
+    "        module=importlib.import_module(name)\n"
+    "        origin=getattr(module, '__file__', None)\n"
+    "        if not origin:\n"
+    "            raise RuntimeError(name + ' 没有可验证的文件路径')\n"
+    "        origin=os.path.normcase(os.path.realpath(origin))\n"
+    "        try:\n"
+    "            inside=os.path.commonpath((root, origin)) == root\n"
+    "        except ValueError:\n"
+    "            inside=False\n"
+    "        if not inside:\n"
+    "            raise RuntimeError(name + ' 来自托管环境之外: ' + origin)\n"
+    "    if importlib.util.find_spec('bitstring') is not None:\n"
+    "        from bitstring import BitStream as _probe_bitstream\n"
+    "        _probe_bitstream()\n"
+    "except Exception as exc:\n"
+    "    out={'ok': False, 'reason': type(exc).__name__ + ': ' + str(exc), 'root': root}\n"
+    "print(json.dumps(out, ensure_ascii=False))"
+)
+
+
 def managed_runtime_health(
     engine: str,
     python_path: Path,
@@ -627,32 +654,16 @@ def managed_runtime_health(
     is accidentally resolved from a global Python installation. Avoid the
     heavyweight pdf2zh_next CLI startup and import only its small critical
     native dependency chain.
+
+    ``bitstring`` is probed as well: babeldoc imports ``BitStream`` from it but
+    declares only ``bitstring>=4.3.0`` with no upper bound, so a fresh resolve
+    can pick 5.x -- a Rust rewrite that dropped ``BitStream`` -- and every
+    translation then dies on ``ImportError`` at babeldoc import time.
     """
     if engine != "pdf2zh_next":
         return True, "ok"
 
-    code = (
-        "import importlib, json, os, sys; "
-        "root=os.path.normcase(os.path.realpath(sys.prefix)); "
-        "names=('pydantic','pydantic_core','pydantic_core._pydantic_core'); "
-        "out={'ok': True, 'reason': 'ok', 'root': root}; "
-        "\ntry:\n"
-        "    for name in names:\n"
-        "        module=importlib.import_module(name)\n"
-        "        origin=getattr(module, '__file__', None)\n"
-        "        if not origin:\n"
-        "            raise RuntimeError(name + ' 没有可验证的文件路径')\n"
-        "        origin=os.path.normcase(os.path.realpath(origin))\n"
-        "        try:\n"
-        "            inside=os.path.commonpath((root, origin)) == root\n"
-        "        except ValueError:\n"
-        "            inside=False\n"
-        "        if not inside:\n"
-        "            raise RuntimeError(name + ' 来自托管环境之外: ' + origin)\n"
-        "except Exception as exc:\n"
-        "    out={'ok': False, 'reason': type(exc).__name__ + ': ' + str(exc), 'root': root}\n"
-        "print(json.dumps(out, ensure_ascii=False))"
-    )
+    code = _MANAGED_RUNTIME_HEALTH_CODE
     try:
         result = subprocess.run(
             [str(python_path), "-I", "-c", code],
